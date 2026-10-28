@@ -616,11 +616,8 @@ function edgeScore(st) {
 }
 
 /* ================= website mode (own database on Supabase) ================= */
-const HOSTED = true; // true in the website build (web/index.html)
-const SUPA_URL = "http://local", SUPA_KEY = "local-server-no-key-needed-0000000000";
-const supaCfg = () => { if (SUPA_URL && SUPA_KEY) return { url: SUPA_URL, key: SUPA_KEY }; try { const c = JSON.parse(localStorage.getItem("tj.supa") || "null"); if (c && c.url && c.key) return c; } catch (e) {} return null; };
+const HOSTED = true; // this build always talks to the MyFundedBook backend through shim.js
 let sb = null, sbUser = null;
-function loadSupabase() { if (window.supabase) return Promise.resolve(); return new Promise((res, rej) => { const el = document.createElement("script"); el.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.1/dist/umd/supabase.js"; el.onload = () => res(); el.onerror = () => rej(new Error("load")); document.head.appendChild(el); }); }
 
 /* ================= storage ================= */
 const COLS = ["trades", "notes", "playbooks", "meta"];
@@ -705,7 +702,6 @@ const Store = {
   async imageUrl(ref) {
     if (!ref) return null;
     if (this.urlCache.has(ref)) return this.urlCache.get(ref);
-    if (ref.startsWith("demo:")) { const u = demoShot(ref); if (u) this.urlCache.set(ref, u); return u; }
     if (ref.startsWith("s:")) { if (!sb) return null; try { const { data } = await sb.storage.from("shots").createSignedUrl(ref.slice(2), 604800); if (data && data.signedUrl) { this.urlCache.set(ref, data.signedUrl); return data.signedUrl; } } catch (e) {} return null; }
     if (ref.startsWith("a:")) { const u = "/_blob/" + ref.slice(2); this.urlCache.set(ref, u); return u; }
     if (ref.startsWith("l:") && this.idb) { try { const rec = await idbGet(this.idb, "images", ref); if (rec) { const u = URL.createObjectURL(rec.blob); this.urlCache.set(ref, u); return u; } } catch (e) {} }
@@ -740,7 +736,7 @@ async function compressImage(file) {
 
 /* ================= state ================= */
 const S = {
-  view: "dash", trades: [], notes: [], playbooks: [], meta: [], demoDismissed: false, demoForce: (() => { try { return localStorage.getItem("tj.samples") === "1"; } catch (e) { return false; } })(),
+  view: "dash", trades: [], notes: [], playbooks: [], meta: [],
   account: "", range: "all", from: "", to: "",
   tf: { q: "", symbol: "", side: "", status: "", playbook: "", tag: "", mistake: "" }, tfTrend: {}, sort: { k: "date", dir: -1 }, sel: new Set(),
   month: (() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; })(),
@@ -759,91 +755,8 @@ function scheduleRender() {
 const meta = () => { const m = S.meta.find(x => x.id === "settings") || {}; return { ...DEFAULT_META, ...m }; };
 async function saveMeta(patch) { const cur = S.meta.find(x => x.id === "settings") || { id: "settings" }; await Store.save("meta", { ...DEFAULT_META, ...cur, ...patch, id: "settings" }); }
 
-/* ---- demo data (shown only while the journal is empty) ---- */
-const DEMO_PB = [
-  { id: "demo-pb1", demo: true, name: "London breakout", description: "Break and retest of the Asian range high/low after 08:00 London.", rules: [{ id: "a", text: "Asian range marked" }, { id: "b", text: "Clean break with momentum candle" }, { id: "c", text: "Entry on retest, not on the break" }, { id: "d", text: "Stop beyond the retest wick" }] },
-  { id: "demo-pb2", demo: true, name: "NY open pullback", description: "Trend continuation entry on the first pullback after the NY open.", rules: [{ id: "a", text: "H1 trend aligned" }, { id: "b", text: "Pullback into 50% of the impulse" }, { id: "c", text: "Confirmation candle on M5" }] },
-  { id: "demo-pb3", demo: true, name: "Liquidity sweep", description: "Fade a sweep of the previous day's high or low.", rules: [{ id: "a", text: "Sweep of PDH/PDL" }, { id: "b", text: "Market structure shift on M5" }, { id: "c", text: "Target opposite liquidity" }] }
-];
-let demoCache = null, demoNotesCache = null;
-const DEMO_SYMS = [
-  { s: "XAUUSD", w: .26, price: 3700, drift: 2.4, vol: 14, risk: [4, 9], dp: 2, lots: [.2, .3, .5, 1], fee: 7 },
-  { s: "XAGUSD", w: .06, price: 44, drift: .02, vol: .35, risk: [.12, .25], dp: 3, lots: [.1, .2, .3], fee: 7 },
-  { s: "EURUSD", w: .08, price: 1.165, drift: 0, vol: .0025, risk: [.0012, .0025], dp: 5, lots: [.5, 1, 1.5], fee: 7 },
-  { s: "GBPUSD", w: .07, price: 1.34, drift: 0, vol: .003, risk: [.0015, .003], dp: 5, lots: [.5, 1], fee: 7 },
-  { s: "USDJPY", w: .06, price: 148, drift: 0, vol: .4, risk: [.15, .3], dp: 3, lots: [.5, 1, 2], fee: 7 },
-  { s: "GBPJPY", w: .04, price: 199, drift: 0, vol: .6, risk: [.2, .45], dp: 3, lots: [.5, 1], fee: 7 },
-  { s: "NAS100", w: .1, price: 24500, drift: 8, vol: 120, risk: [25, 60], dp: 1, lots: [1, 2, 5], fee: 0 },
-  { s: "US30", w: .06, price: 45800, drift: 6, vol: 120, risk: [40, 90], dp: 0, lots: [1, 2, 3], fee: 0 },
-  { s: "SPX500", w: .04, price: 6600, drift: 2, vol: 30, risk: [6, 14], dp: 1, lots: [2, 5, 10], fee: 0 },
-  { s: "BTCUSD", w: .1, price: 112000, drift: 40, vol: 1800, risk: [500, 1200], dp: 0, lots: [.05, .1, .2], fee: 5 },
-  { s: "ETHUSD", w: .05, price: 4300, drift: 1, vol: 90, risk: [25, 60], dp: 1, lots: [.5, 1, 2], fee: 5 },
-  { s: "USOIL", w: .08, price: 63, drift: 0, vol: .9, risk: [.25, .6], dp: 2, lots: [.2, .5, 1], fee: 7 }
-];
-const DEMO_NOTES = ["Patient morning. Waited for London to sweep the Asian low before taking anything.", "Two losses before NY, then stopped trading as planned. Good discipline even though red.", "Took the CPI spike too early. Next time wait for the first 5m close after news.", "Best day this week. Followed the London breakout checklist to the letter.", "Choppy range all session. Should have sat on my hands after the first stop out.", "Moved my stop on the second trade and it cost me a full R. Write the rule on a sticky note.", "Scaled out too early on the winner. Let runners run to the planned target.", "Quiet Friday, one clean trade and done."];
-function demoTrades() {
-  if (demoCache) return demoCache;
-  let seed = (Date.now() % 2147483646) + 1; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  const pick = a => a[Math.floor(rnd() * a.length)];
-  const px = Object.fromEntries(DEMO_SYMS.map(d => [d.s, d.price]));
-  const skill = Object.fromEntries(DEMO_SYMS.map(d => [d.s, (rnd() - .4) * .3])); // some assets lose money, which ones changes each load
-  const out = []; const today = todayStr();
-  for (let back = 3 * 365; back >= 1; back--) {
-    const date = addDays(today, -back), dw = pd(date).getDay(); if (dw === 0 || dw === 6) continue;
-    DEMO_SYMS.forEach(d => { px[d.s] += d.drift + (rnd() - .48) * d.vol; });
-    if (rnd() < .12) continue; // some days off
-    const n = 1 + Math.floor(rnd() * 4);
-    for (let k = 0; k < n; k++) {
-      let r0 = rnd(), sym = DEMO_SYMS[0]; for (const d of DEMO_SYMS) { if (r0 < d.w) { sym = d; break; } r0 -= d.w; }
-      const pb = pick(DEMO_PB), side = rnd() > .42 ? "long" : "short", dir = side === "long" ? 1 : -1;
-      const f = v => +v.toFixed(sym.dp);
-      const entry = f(px[sym.s] + (rnd() - .5) * sym.vol * .4), riskPts = sym.risk[0] + rnd() * (sym.risk[1] - sym.risk[0]);
-      const stop = f(entry - dir * riskPts), target = f(entry + dir * riskPts * (2 + rnd()));
-      const roll = rnd(); const rr = roll < .37 + skill[sym.s] ? -1 - (rnd() < .15 ? .4 : 0) : roll < .44 ? 0 : roll < .6 ? .5 + rnd() * .9 : 1.6 + rnd() * 1.6;
-      const exit = f(entry + dir * riskPts * rr), lots = pick(sym.lots);
-      const hh = k === 0 ? 7 + Math.floor(rnd() * 3) : k === 1 ? 13 + Math.floor(rnd() * 2) : 15 + Math.floor(rnd() * 2), mm = Math.floor(rnd() * 60), hold = 6 + Math.floor(rnd() * (rnd() < .1 ? 600 : 150));
-      const endM = Math.min(23 * 60 + 59, hh * 60 + mm + hold);
-      const mistakes = rr <= 0 && rnd() > .4 ? [pick(["FOMO", "Moved stop", "Chased entry", "Revenge trade", "Oversized", "No setup"])] : rr > 0 && rr < 1 && rnd() > .5 ? ["Early exit"] : [];
-      const id = `demo${out.length}`, shots = rnd() < .8;
-      out.push({ id, demo: true, account: rnd() < .7 ? "Main" : "Prop 100k", date, time: `${pad(hh)}:${pad(mm)}`, exitDate: date, exitTime: `${pad(Math.floor(endM / 60))}:${pad(endM % 60)}`, symbol: sym.s, side, entry, stop, target, exit, lots, fees: +(lots * sym.fee).toFixed(2), pnl: null, setup: "", playbookId: pb.id, ...(() => { const two = rnd() < .12 ? DEMO_PB.find(x => x.id !== pb.id && rnd() < .7) : null, ps = two ? [pb, two] : [pb]; return { playbookIds: ps.map(x => x.id), rulesFollowed: ps.flatMap(x => x.rules.filter(() => rnd() > (rr > 0 ? .15 : .45)).map(r => x.id + ":" + r.id)) }; })(), tags: [hh < 7 ? "Asia" : hh < 12 ? "London" : "New York"].filter(Boolean), trend: Object.fromEntries(TREND_TF.filter(() => rnd() > .3).map(([k]) => [k, (rnd() < (pnlSign(exit, entry, side) > 0 ? .7 : .4)) === (side === "long") ? "bull" : "bear"])), mistakes, rating: rr > 1.5 ? 5 : rr > 0 ? 4 : mistakes.length ? 2 : 3, notes: rr > 1.5 ? "Textbook entry on the retest, held to target." : mistakes.length ? `Sample trade. Mistake: ${mistakes[0].toLowerCase()}.` : "Sample trade to show how the journal looks.", before: shots ? `demo:${id}:before` : null, after: shots ? `demo:${id}:after` : null });
-    }
-  }
-  return (demoCache = out);
-}
-function demoNotes() {
-  if (demoNotesCache) return demoNotesCache;
-  const days = [...new Set(demoTrades().map(t => t.date))];
-  const m = new Map(); days.forEach((d, i) => { if (i % 3 === 0) m.set(d, { id: "day-" + d, kind: "day", date: d, body: DEMO_NOTES[i % DEMO_NOTES.length], demo: true, rules: { r1: i % 4 !== 1, r2: true, r3: i % 5 !== 2, r4: i % 6 !== 3, r5: true } }); });
-  return (demoNotesCache = m);
-}
-/* draws a fake candlestick chart for a sample trade's before/after screenshot */
-function demoShot(ref) {
-  const [, id, which] = ref.split(":"); const t = demoTrades().find(x => x.id === id); if (!t) return null;
-  let seed = 0; for (const ch of id) seed = (seed * 31 + ch.charCodeAt(0)) % 2147483647; seed = seed || 9;
-  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  const W = 960, H = 540, risk = Math.abs(t.entry - t.stop), nB = 70, nA = 30;
-  const closes = []; let p = t.entry + (rnd() - .5) * risk * 4;
-  for (let i = 0; i < nB; i++) { const left = nB - i; p += (t.entry - p) / left + (rnd() - .5) * risk * .55; closes.push(i === nB - 1 ? t.entry : p); }
-  for (let i = 1; i <= nA; i++) { const left = nA - i + 1; p += (t.exit - p) / left + (rnd() - .5) * risk * .5; closes.push(i === nA ? t.exit : p); }
-  const show = which === "before" ? closes.slice(0, nB) : closes;
-  const candles = show.map((c, i) => { const o = i ? show[i - 1] : c - (rnd() - .5) * risk * .3; const hi = Math.max(o, c) + rnd() * risk * .25, lo = Math.min(o, c) - rnd() * risk * .25; return { o, c, hi, lo }; });
-  const lv = [t.stop, t.target, ...candles.flatMap(k => [k.hi, k.lo])]; let lo = Math.min(...lv), hi = Math.max(...lv); const padv = (hi - lo) * .08; lo -= padv; hi += padv;
-  const cv = document.createElement("canvas"); cv.width = W; cv.height = H; const g = cv.getContext("2d");
-  g.fillStyle = "#0a0a0b"; g.fillRect(0, 0, W, H);
-  const L = 10, R = 80, cw = (W - L - R) / (nB + nA), y = v => 16 + (H - 40) * (1 - (v - lo) / (hi - lo));
-  g.strokeStyle = "#1c1c20"; g.lineWidth = 1; for (let i = 1; i < 6; i++) { g.beginPath(); g.moveTo(0, H * i / 6); g.lineTo(W - R, H * i / 6); g.stroke(); }
-  const lvl = (v, col, label) => { g.strokeStyle = col; g.setLineDash([6, 5]); g.beginPath(); g.moveTo(L + cw * (nB - 8), y(v)); g.lineTo(W - R, y(v)); g.stroke(); g.setLineDash([]); g.fillStyle = col; g.fillRect(W - R + 2, y(v) - 9, R - 4, 18); g.fillStyle = "#000"; g.font = "bold 11px monospace"; g.fillText(label, W - R + 6, y(v) + 4); };
-  if (t.side === "long") { g.fillStyle = "rgba(63,191,138,.08)"; g.fillRect(L + cw * (nB - 1), y(t.target), W - R - L - cw * (nB - 1), y(t.entry) - y(t.target)); g.fillStyle = "rgba(239,106,99,.08)"; g.fillRect(L + cw * (nB - 1), y(t.entry), W - R - L - cw * (nB - 1), y(t.stop) - y(t.entry)); }
-  else { g.fillStyle = "rgba(63,191,138,.08)"; g.fillRect(L + cw * (nB - 1), y(t.entry), W - R - L - cw * (nB - 1), y(t.target) - y(t.entry)); g.fillStyle = "rgba(239,106,99,.08)"; g.fillRect(L + cw * (nB - 1), y(t.stop), W - R - L - cw * (nB - 1), y(t.entry) - y(t.stop)); }
-  candles.forEach((k, i) => { const x = L + cw * i + cw / 2, up = k.c >= k.o; g.strokeStyle = g.fillStyle = up ? "#3fbf8a" : "#ef6a63"; g.beginPath(); g.moveTo(x, y(k.hi)); g.lineTo(x, y(k.lo)); g.stroke(); g.fillRect(x - cw * .32, Math.min(y(k.o), y(k.c)), cw * .64, Math.max(1, Math.abs(y(k.o) - y(k.c)))); });
-  lvl(t.target, "#3fbf8a", "TP " + t.target); lvl(t.stop, "#ef6a63", "SL " + t.stop); lvl(t.entry, "#d6ab4f", "EN " + t.entry);
-  if (which === "after") { const x = L + cw * (nB + nA - 1) + cw / 2; g.fillStyle = "#ecebe7"; g.beginPath(); g.arc(x, y(t.exit), 6, 0, Math.PI * 2); g.fill(); }
-  g.fillStyle = "#8b8f99"; g.font = "13px sans-serif"; g.fillText(`${t.symbol} · M5 · ${which === "before" ? "Before" : "After"} · sample chart`, 14, 24);
-  return cv.toDataURL("image/jpeg", .85);
-}
-const isDemo = () => S.demoForce || (!S.trades.length && !S.demoDismissed);
-const allTrades = () => isDemo() ? demoTrades() : S.trades;
-const allPlaybooks = () => [...(S.demoForce ? DEMO_PB : S.playbooks.length || !isDemo() ? S.playbooks : DEMO_PB)].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" }));
+const allTrades = () => S.trades;
+const allPlaybooks = () => [...S.playbooks].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" }));
 const pbById = id => allPlaybooks().find(p => p.id === id);
 const tPbs = t => (Array.isArray(t.playbookIds) && t.playbookIds.length ? t.playbookIds : t.playbookId ? [t.playbookId] : []);
 const tPbObjs = t => tPbs(t).map(pbById).filter(Boolean);
@@ -956,8 +869,6 @@ function render() {
   if (Store.mode === "loading") { main.innerHTML = `<div class="empty" style="margin-top:20px"><b>Opening your journal…</b>Loading trades and screenshots.</div>`; return; }
   const V = { profile: vProfile, dash: vDash, journal: vJournal, trades: vTrades, trade: vTrade, notebook: vNotebook, reports: vReports, playbooks: vPlaybooks, playbook: vPlaybook, progress: vProgress, settings: vSettings }[S.view] || vDash;
   let html = "";
-  if (S.demoForce && !["notebook", "profile"].includes(S.view)) html += `<div class="banner"><span><b>Sample trades.</b> You're looking at 3 years of made-up trades. Your real trades are safe. Pick All accounts or tap Back to my trades to return to them.</span><span class="sp"></span><button class="btn small primary" data-act="sampleMode">Back to my trades</button></div>`;
-  else if (isDemo() && !["settings", "notebook", "progress", "profile"].includes(S.view)) html += `<div class="banner"><span><b>Sample trades.</b> Your journal is empty, so you're seeing 3 years of made-up trades across gold, forex, indices, crypto and oil. They change every time you open the page. Add or import your first trade and they disappear.</span><span class="sp"></span><button class="btn small" data-act="hideDemo">Hide samples</button><button class="btn small" data-act="go" data-view="settings">Import from MT4/MT5</button><button class="btn small primary" data-act="newTrade" ${Store.writable ? "" : "disabled"}>+ Add trade</button></div>`;
   html += V();
   main.innerHTML = html;
   drawCharts(); loadThumbs();
@@ -972,7 +883,7 @@ function gfilter() {
   const accs = accountsList();
   const rg = [["all", "All time"], ["week", "This week"], ["month", "This month"], ["30d", "Last 30 days"], ["90d", "Last 90 days"], ["year", "This year"], ["custom", "Custom range"]];
   return `<div class="gfilter">
-    <select id="g-acc" data-chg="account" aria-label="Account" class="${S.account || S.demoForce ? "on" : ""}"><option value="" ${!S.account && !S.demoForce ? "selected" : ""}>All accounts</option>${S.demoForce ? "" : accs.map(a => `<option ${a === S.account ? "selected" : ""}>${esc(a)}</option>`).join("")}<option value="__sample" ${S.demoForce ? "selected" : ""}>Sample trades (3 years)</option></select>
+    <select id="g-acc" data-chg="account" aria-label="Account" class="${S.account ? "on" : ""}"><option value="" ${!S.account ? "selected" : ""}>All accounts</option>${accs.map(a => `<option ${a === S.account ? "selected" : ""}>${esc(a)}</option>`).join("")}</select>
     <select id="g-range" data-chg="range" aria-label="Date range" class="${S.range !== "all" ? "on" : ""}">${rg.map(([k, l]) => `<option value="${k}" ${k === S.range ? "selected" : ""}>${l}</option>`).join("")}</select>
     ${S.range === "custom" ? `<input type="date" id="g-from" data-chg="from" value="${esc(S.from)}" aria-label="From"><input type="date" id="g-to" data-chg="to" value="${esc(S.to)}" aria-label="To">` : ""}
   </div>`;
@@ -1093,7 +1004,7 @@ function calendarHtml(list) {
 }
 
 /* ---------- Daily journal ---------- */
-function dayNote(date) { return S.notes.find(n => n.id === "day-" + date) || (isDemo() ? demoNotes().get(date) : undefined); }
+function dayNote(date) { return S.notes.find(n => n.id === "day-" + date); }
 function vJournal() {
   const list = scoped(), bd = byDay(list);
   const noteDays = S.notes.filter(n => n.kind === "day" && n.body && n.date).map(n => n.date);
@@ -1107,7 +1018,7 @@ function vJournal() {
   ${dates.length > shown.length ? `<div style="text-align:center;margin-top:14px"><button class="btn" data-act="jmore">Show older days</button></div>` : ""}`}`;
 }
 function dayCard(date, d) {
-  const st = stats(d.trades), note = dayNote(date), demo = d.trades.some(t => t.demo);
+  const st = stats(d.trades), note = dayNote(date);
   const vals = asc(d.trades).map(t => M(t).pnl || 0); let c = 0; const cumv = vals.map(v => (c += v));
   const mst = (l, v, k = "") => `<div><div class="label">${l}</div><div class="v ${k}">${v}</div></div>`;
   return `<section class="panel jday">
@@ -1115,7 +1026,7 @@ function dayCard(date, d) {
     <div class="jday-body">
       <div style="display:grid;gap:12px;align-content:start">${d.n ? spark(cumv, 260, 64) : ""}
         <div class="mstats">${mst("Total trades", d.n)}${mst("Winners / losers", `<span class="win">${d.w}</span> / <span class="loss">${d.l}</span>`)}${mst("Win rate", pct(st.winRate))}${mst("Commissions", money0(d.fees))}${mst("Volume", +d.lots.toFixed(2) + " lots")}${mst("Profit factor", fx(st.pf))}</div></div>
-      <div class="field"><label for="dn-${date}">Journal note</label><textarea id="dn-${date}" data-live data-inp="daynote" data-date="${date}" placeholder="How did you trade today? What did you do well, what will you change tomorrow?" ${Store.writable && !demo ? "" : "readonly"}>${esc(note ? note.body : "")}</textarea></div>
+      <div class="field"><label for="dn-${date}">Journal note</label><textarea id="dn-${date}" data-live data-inp="daynote" data-date="${date}" placeholder="How did you trade today? What did you do well, what will you change tomorrow?" ${Store.writable ? "" : "readonly"}>${esc(note ? note.body : "")}</textarea></div>
     </div>
     ${d.n ? `<details ${S.journalFocus ? "open" : ""}><summary>${d.n} trade${d.n > 1 ? "s" : ""}</summary><div class="tbl-wrap" style="padding:0 8px 8px">${tradeTable(asc(d.trades), false)}</div></details>` : ""}
   </section>`;
@@ -1153,7 +1064,7 @@ function galleryHtml(list) {
 }
 function tradeTable(list, full = true) {
   const sh = (k, l, r = "") => full ? `<th class="${r}" data-act="sort" data-k="${k}">${l}${S.sort.k === k ? (S.sort.dir > 0 ? " ↑" : " ↓") : ""}</th>` : `<th class="${r}">${l}</th>`;
-  const canSel = full && Store.writable && !isDemo(), selCol = canSel && S.sel.size > 0;
+  const canSel = full && Store.writable, selCol = canSel && S.sel.size > 0;
   return `<table><thead><tr>${selCol ? `<th><input type="checkbox" id="selAll" data-chg="selAll" aria-label="Select all" ${list.length && list.every(t => S.sel.has(t.id)) ? "checked" : ""}></th>` : ""}${sh("date", "Open date")}<th>Status</th>${sh("symbol", "Symbol")}<th>Side</th><th class="r">Entry</th><th class="r">Exit</th>${sh("lots", "Lots", "r")}${sh("pnl", "Net P&amp;L", "r")}${sh("r", "R", "r")}<th>Model</th>${full ? `<th>Session</th>${sh("rating", "Rating")}` : ""}</tr></thead>
   <tbody>${list.map(t => { const m = M(t), pbs = tPbObjs(t); return `<tr class="click${S.sel.has(t.id) ? " selrow" : ""}" data-act="openTrade" data-id="${esc(t.id)}"${canSel ? ` data-hold="1"` : ""}>
     ${selCol ? `<td data-stop><input type="checkbox" data-chg="sel" data-id="${esc(t.id)}" aria-label="Select trade" ${S.sel.has(t.id) ? "checked" : ""}></td>` : ""}
@@ -1237,7 +1148,7 @@ function bdPageHtml(t) {
 }
 function openBreakdown(id) {
   const t = allTrades().find(x => x.id === id); if (!t) return;
-  const canEdit = Store.writable && !t.demo, top = `<div class="bdv-top"><span class="t"><b>${esc(t.symbol || "")}</b> · Trade breakdown · ${fmtDate(t.date, { day: "numeric", month: "short" })}</span></div>`;
+  const canEdit = Store.writable, top = `<div class="bdv-top"><span class="t"><b>${esc(t.symbol || "")}</b> · Trade breakdown · ${fmtDate(t.date, { day: "numeric", month: "short" })}</span></div>`;
   const all = bdPageHtml(t);
   openSheet(`<div class="bdv" id="bdv" role="dialog" aria-modal="true" aria-label="Trade breakdown">${top}
     <div class="bdv-tools"><button class="btn small ghost" id="bdDl" aria-label="Download breakdown" title="Download breakdown"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></svg></button>${canEdit ? `<button class="btn small ghost" data-act="bdEdit" data-id="${esc(t.id)}">Edit</button>` : ""}<button class="btn small ghost" data-act="close" aria-label="Close">✕</button></div>
@@ -1298,7 +1209,7 @@ function vTrade() {
   const m = M(t), pbs = tPbObjs(t), seq = asc(scoped()), idx = seq.findIndex(x => x.id === t.id);
   const prev = idx > 0 ? seq[idx - 1] : null, next = idx >= 0 && idx < seq.length - 1 ? seq[idx + 1] : null;
   const kv = (k, v) => `<div>${k}</div><div>${v}</div>`;
-  const canEdit = Store.writable && !t.demo;
+  const canEdit = Store.writable;
   const shot = (w) => t[w] ? `<div data-img="${esc(t[w])}" data-zoom="1" data-alt="${w} screenshot"><div class="noshot">Loading…</div></div>` : `<div class="noshot"><span>No ${w} screenshot${canEdit ? `<br><button class="btn small" style="margin-top:8px" data-act="editTrade" data-id="${esc(t.id)}">Add one</button>` : ""}</span></div>`;
   return `<div class="pagehead"><button class="btn small ghost" data-act="go" data-view="trades">← Trade log</button>
     <h1>${esc(t.symbol)}</h1><span class="badge ${t.side}">${t.side}</span><span class="muted">${fmtDate(t.date)} ${esc(t.time || "")}</span>
@@ -1338,7 +1249,7 @@ function vNotebook() {
   const userNotes = S.notes.filter(n => n.kind === "note");
   const folders = [...new Set(["My notes", ...userNotes.map(n => n.folder || "My notes")])];
   const dayN = S.notes.filter(n => n.kind === "day" && n.body);
-  const tradeN = allTrades().filter(t => t.notes && !t.demo);
+  const tradeN = allTrades().filter(t => t.notes);
   let items = [];
   const f = S.nbFolder;
   const asItem = n => ({ id: n.id, type: n.kind, title: n.kind === "day" ? fmtDate(n.date) : (n.title || "Untitled"), sub: (n.body || "").slice(0, 80), sortKey: n.kind === "day" ? n.date : (n.updatedAt || "") });
@@ -1488,7 +1399,7 @@ function vPlaybook() {
   const all = list.filter(t => M(t).status !== "open");
   const fullRules = all.filter(t => p.rules.every(r => ruleOn(t, p, r))), broke = all.filter(t => !p.rules.every(r => ruleOn(t, p, r)));
   const sF = stats(fullRules), sB = stats(broke);
-  return `<div class="pagehead"><button class="btn small ghost" data-act="go" data-view="playbooks">← Models</button><h1>${esc(p.name)}</h1>${gfilter()}${Store.writable && !p.demo ? `<button class="btn" data-act="editPb" data-id="${esc(p.id)}">Edit</button>` : ""}</div>
+  return `<div class="pagehead"><button class="btn small ghost" data-act="go" data-view="playbooks">← Models</button><h1>${esc(p.name)}</h1>${gfilter()}${Store.writable ? `<button class="btn" data-act="editPb" data-id="${esc(p.id)}">Edit</button>` : ""}</div>
   ${p.description ? `<p class="muted" style="margin-top:-6px;max-width:70ch">${esc(p.description)}</p>` : ""}
   <div class="grid g5"><div class="panel kpi"><div class="label">Net P&amp;L</div><div class="big ${cls(st.net)}">${money(st.net)}</div><div class="sub">${st.total} trades</div></div><div class="panel kpi"><div class="label">Win rate</div><div class="big">${pct(st.winRate)}</div></div><div class="panel kpi"><div class="label">Profit factor</div><div class="big">${fx(st.pf)}</div></div><div class="panel kpi"><div class="label">Expectancy</div><div class="big ${cls(st.expectancy)}">${money(st.expectancy)}</div></div><div class="panel kpi"><div class="label">Avg R</div><div class="big ${cls(st.avgR)}">${rfmt(st.avgR)}</div></div></div>
   <div class="grid g2 mt">
@@ -1541,8 +1452,8 @@ function vSettings() {
     <div class="panel"><h3>Import trades</h3><p class="muted" style="margin-top:0"><b class="plat">MT4 / MT5:</b> in the History tab, right-click and choose <b>Report</b> (MT5) or <b>Save as Detailed Report</b> (MT4), then upload the .html or .xlsx file.<br><b class="plat">Tradovate</b> (Lucid, Tradeify, Apex and others): Reports → Performance → Download CSV.<br><b class="plat">NinjaTrader:</b> Trade Performance → Trades → right-click → Export.<br><b class="plat">ProjectX / TopstepX:</b> Trades → Export CSV.<br>Any other .csv with one row per trade works too. You'll match the columns before anything is saved.</p>
       <button class="btn primary" data-act="brokerImport" ${Store.writable ? "" : "disabled"}>Choose broker file…</button></div>
     <div class="panel"><h3>Backup</h3><p class="muted" style="margin-top:0">Export your trades as an Excel sheet, or export everything (trades, screenshots, notes, models) as one JSON file, or restore from one. Importing skips trades that are already here.</p>
-      <div class="toolbar"><button class="btn" data-act="sampleMode">${S.demoForce ? "Back to my trades" : "Show 3-year sample trades"}</button><button class="btn" data-act="exportXlsxAll">Export to Excel</button><button class="btn" data-act="export">Export backup</button><button class="btn" data-act="importJson" ${Store.writable ? "" : "disabled"}>Import backup…</button></div>
-      <div class="muted" style="font-size:13px">${Store.mode === "cloud" ? "Your journal syncs to your account, so it's the same on every device you open this link on." : Store.mode === "web" ? "Your journal saves to your own database and syncs live to every device you sign in on." : Store.mode === "local" ? "Data lives only in this browser. Export a backup now and then." : ""}</div></div>
+      <div class="toolbar"><button class="btn" data-act="exportXlsxAll">Export to Excel</button><button class="btn" data-act="export">Export backup</button><button class="btn" data-act="importJson" ${Store.writable ? "" : "disabled"}>Import backup…</button></div>
+      <div class="muted" style="font-size:13px">${Store.mode === "cloud" ? "Your journal syncs to your account, so it's the same on every device you open this link on." : Store.mode === "web" ? "Your journal is saved on your server and is the same on every device you sign in on. Other devices pick up changes when you reload or switch back to the tab." : Store.mode === "local" ? "Data lives only in this browser. Export a backup now and then." : ""}</div></div>
     <div class="panel"><h3>Accounts</h3>${listEd("accounts", m.accounts, "e.g. FTMO 100k")}</div>
     <div class="panel"><h3>Mistake list</h3>${listEd("mistakes", m.mistakes, "e.g. Traded the news")}</div>
     <div class="panel"><h3>Appearance</h3><button class="btn" data-act="theme">Switch light / dark</button></div>
@@ -1577,8 +1488,6 @@ ACT.go = el => go(el.dataset.view);
 ACT.more = () => openSheet(`<div class="sheet narrow" role="dialog" aria-modal="true" aria-label="More"><div class="sheet-head"><h2>More</h2><button class="btn small ghost x" data-act="close" aria-label="Close">✕</button></div><div class="sheet-body" style="gap:4px">${NAV.filter(n => !["dash", "journal", "trades"].includes(n[0])).map(([k, l]) => `<button class="nav" data-act="goClose" data-view="${k}">${icon(k)}${l}</button>`).join("")}${hasPw() || (HOSTED && sbUser) ? `<button class="nav" data-act="lockNow">${HOSTED ? "Sign out" : "Lock journal"}</button>` : ""}<button class="nav" data-act="theme">Switch light / dark</button><div class="muted" style="font-size:12px;padding:8px 10px">${$("#storageNote").textContent}</div></div></div>`);
 ACT.goClose = el => { closeLayer(); go(el.dataset.view); };
 ACT.close = () => closeLayer();
-ACT.hideDemo = () => { S.demoDismissed = true; render(); };
-ACT.sampleMode = () => { S.demoForce = !S.demoForce; S.demoDismissed = false; S.account = ""; try { localStorage.setItem("tj.samples", S.demoForce ? "1" : "0"); } catch (e) {} toast(S.demoForce ? "Showing 3 years of sample trades" : "Back to your trades"); go(S.demoForce ? "dash" : S.view); };
 ACT.theme = () => { const nx = document.documentElement.classList.contains("app-light") ? "dark" : "light"; document.documentElement.classList.toggle("app-light", nx === "light"); try { localStorage.setItem("tj.theme", nx); } catch (e) {} drawCharts(); };
 ACT.month = el => { const d = +el.dataset.d; if (!d) { const n = new Date(); S.month = { y: n.getFullYear(), m: n.getMonth() }; } else { const dt = new Date(S.month.y, S.month.m + d, 1); S.month = { y: dt.getFullYear(), m: dt.getMonth() }; } render(); };
 ACT.calDay = el => { S.journalFocus = el.dataset.day; go("journal"); };
@@ -1624,7 +1533,7 @@ ACT.exportXlsx = () => exportExcel(filteredTrades(), "trade-log");
 ACT.exportXlsxAll = () => askExportAcc("excel");
 const accSlug = a => String(a).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "account";
 function askExportAcc(kind) {
-  const accs = accountsList(), pre = S.account && S.account !== "__sample" ? S.account : "";
+  const accs = accountsList(), pre = S.account || "";
   openSheet(`<form class="sheet" id="eaf" role="dialog" aria-modal="true" aria-label="Export" style="max-width:420px"><div class="sheet-head"><h2>${kind === "backup" ? "Export backup" : "Export to Excel"}</h2><button type="button" class="btn small ghost x" data-act="close" aria-label="Close">✕</button></div>
     <div class="sheet-body"><div class="field"><label for="ea-acc">Which account?</label><select id="ea-acc"><option value="" ${pre ? "" : "selected"}>All accounts</option>${accs.map(a => `<option ${a === pre ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></div></div>
     <div class="sheet-foot"><button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn primary" type="submit">Export</button></div></form>`, () => {
@@ -1637,9 +1546,9 @@ function askExportAcc(kind) {
 }
 ACT.importJson = () => askImportAcc("backup");
 ACT.brokerImport = () => askImportAcc("broker");
-ACT.importHere = () => { if (S.account && !S.demoForce) { S.importAcc = S.account; $("#brokerFile").click(); } else askImportAcc("broker"); };
+ACT.importHere = () => { if (S.account) { S.importAcc = S.account; $("#brokerFile").click(); } else askImportAcc("broker"); };
 function askImportAcc(kind) {
-  const accs = accountsList(), pre = S.account && S.account !== "__sample" ? S.account : kind === "backup" ? "" : accs[0];
+  const accs = accountsList(), pre = S.account || (kind === "backup" ? "" : accs[0]);
   openSheet(`<form class="sheet" id="iaf" role="dialog" aria-modal="true" aria-label="Import trades" style="max-width:420px"><div class="sheet-head"><h2>${kind === "backup" ? "Import backup" : "Import trades"}</h2><button type="button" class="btn small ghost x" data-act="close" aria-label="Close">✕</button></div>
     <div class="sheet-body"><div class="field"><label for="ia-acc">Import into which account?</label><select id="ia-acc">${kind === "backup" ? `<option value="" ${pre ? "" : "selected"}>Keep the accounts saved in the backup</option>` : ""}${accs.map(a => `<option ${a === pre ? "selected" : ""}>${esc(a)}</option>`).join("")}<option value="__new">+ New account…</option></select></div>
     <div class="field" id="ia-newf" hidden><label for="ia-new">New account name</label><input id="ia-new" placeholder="e.g. FTMO 100k"></div>
@@ -1655,7 +1564,7 @@ function askImportAcc(kind) {
   });
 }
 
-CHG.account = el => { if (el.value === "__sample" || S.demoForce) { S.demoForce = el.value === "__sample"; S.demoDismissed = false; try { localStorage.setItem("tj.samples", S.demoForce ? "1" : "0"); } catch (e) {} if (S.demoForce) { S.account = ""; S.animate = true; return render(); } } S.account = el.value; try { localStorage.setItem("tj.account", S.account); } catch (e) {} render(); };
+CHG.account = el => { S.account = el.value; try { localStorage.setItem("tj.account", S.account); } catch (e) {} render(); };
 CHG.range = el => { S.range = el.value; try { localStorage.setItem("tj.range", S.range); } catch (e) {} render(); };
 CHG.from = el => { S.from = el.value; render(); };
 CHG.to = el => { S.to = el.value; render(); };
@@ -1827,7 +1736,7 @@ function openEditor(existing, presetDate) {
         else if (p === null) { out[which] = null; if (t[which]) toDelete.push(t[which]); }
       }
       $("#saveMsg").textContent = "Saving…";
-      out.updatedAt = new Date().toISOString(); out.createdAt ||= out.updatedAt; delete out.demo;
+      out.updatedAt = new Date().toISOString(); out.createdAt ||= out.updatedAt; 
       out.rulesFollowed = (out.rulesFollowed || []).filter(k => { const [pid, rid] = String(k).split(":"); const p = out.playbookIds.includes(pid) && S.playbooks.find(x => x.id === pid); return p && p.rules.some(r => r.id === rid); });
       await Store.save("trades", out);
       for (const ref of toDelete) await Store.deleteImage(ref);
@@ -1998,7 +1907,7 @@ $("#brokerFile").addEventListener("change", async e => {
 });
 function openMapper(header, body, map) {
   const into = S.importAcc || S.account || meta().accounts[0]; S.importAcc = "";
-  const accs = [...new Set([...meta().accounts, into].filter(a => a && a !== "__sample"))], sample = body[0] || [];
+  const accs = [...new Set([...meta().accounts, into].filter(Boolean))], sample = body[0] || [];
   const sel = k => `<select id="map-${k}" aria-label="Column for ${k}"><option value="">Not in file</option>${header.map((h, i) => `<option value="${i}" ${map[k] === i ? "selected" : ""}>${esc(h || "Column " + (i + 1))}</option>`).join("")}</select>`;
   openSheet(`<form class="sheet" id="mapf" role="dialog" aria-modal="true" aria-label="Match columns"><div class="sheet-head"><h2>Match columns</h2><button type="button" class="btn small ghost x" data-act="close" aria-label="Close">✕</button></div>
     <div class="sheet-body"><p class="muted" style="margin:0">Found ${body.length} rows. Check that each field points at the right column. The grey text is the first row's value.</p>
@@ -2092,7 +2001,7 @@ document.addEventListener("visibilitychange", () => { const m = profile().autoLo
 ACT.lockNow = () => { if (HOSTED) ACT.signOut(); else if (hasPw()) lockScreen(); };
 
 function vProfile() {
-  const p = profile(), init = (p.name || "?").split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase(), st = stats(allTrades().filter(t => !t.demo));
+  const p = profile(), init = (p.name || "?").split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase(), st = stats(allTrades());
   const ro = !Store.writable, no = !cryptoOk();
   return `<div class="pagehead"><h1>Profile</h1></div>
   <div class="grid g2">
@@ -2100,7 +2009,7 @@ function vProfile() {
       <form class="pform mt" id="pfInfo" data-live><div class="field"><label for="pf-name">Name</label><input id="pf-name" value="${esc(p.name || "")}" autocomplete="name" ${ro ? "disabled" : ""}></div>
       <div class="field"><label for="pf-email">Email (optional)</label><input id="pf-email" type="email" value="${esc(p.email || "")}" autocomplete="email" ${ro ? "disabled" : ""}></div>
       <div><button class="btn primary" data-act="saveProfile" type="button" ${ro ? "disabled" : ""}>Save profile</button></div></form></div>
-    ${HOSTED ? `<div class="panel"><h3>Account</h3><p class="muted" style="margin-top:0">Signed in as <b style="color:var(--fg)">${esc((sbUser && sbUser.email) || "")}</b>. Your trades save to your own database and sync live to every device you sign in on.</p>
+    ${HOSTED ? `<div class="panel"><h3>Account</h3><p class="muted" style="margin-top:0">Signed in as <b style="color:var(--fg)">${esc((sbUser && sbUser.email) || "")}</b>. Your trades are saved on your own server and are the same on every device you sign in on.</p>
       <form class="pform" id="pfPw" data-live autocomplete="off">
         <div class="field"><label for="pf-new">New password</label><input type="password" id="pf-new" autocomplete="new-password" placeholder="At least 6 characters"></div>
         <div class="field"><label for="pf-new2">Confirm password</label><input type="password" id="pf-new2" autocomplete="new-password"></div>
@@ -2149,47 +2058,25 @@ function countUp(el) {
 
 /* ================= website sign-in ================= */
 const authMsg = e => { const m = String((e && e.message) || e || ""); return /invalid login/i.test(m) ? "Wrong email or password." : /not confirmed/i.test(m) ? "Confirm your email first. Open the link we sent you, then sign in." : /already registered/i.test(m) ? "That email already has an account. Sign in instead." : /fetch|network/i.test(m) ? "Couldn't reach the database. Check your internet and try again." : m || "Something went wrong. Try again."; };
-function connectScreen() {
-  S.locked = true; render();
-  showGate(`<div class="gwrap"><form class="gcard" id="gCfg" autocomplete="off"><div class="gword">MYFUNDEDBOOK</div><h2>Connect your database</h2><div class="sub">Paste your Supabase Project URL and publishable (or anon) key. You find both in Supabase under Project Settings, then API Keys.</div>
-    <input id="gUrl" placeholder="https://xxxx.supabase.co" aria-label="Project URL" spellcheck="false"><input id="gKey" placeholder="Publishable key" aria-label="Publishable key" spellcheck="false">
-    <div class="err" id="gErr" role="alert"></div><button class="btn primary" type="submit" id="gGo">Connect</button></form></div>`, () => {
-    $("#gCfg").addEventListener("submit", async e => {
-      e.preventDefault(); const url = $("#gUrl").value.trim().replace(/\/+$/, ""), key = $("#gKey").value.trim(), err = $("#gErr");
-      if (!/^https:\/\/[^\s/]+$/.test(url)) { err.textContent = "The Project URL looks like https://xxxx.supabase.co"; return; } if (key.length < 30) { err.textContent = "Paste the full publishable key."; return; }
-      $("#gGo").disabled = true; err.textContent = "";
-      try { await loadSupabase(); const c = supabase.createClient(url, key, { auth: { persistSession: false } }); const { error } = await c.from("journal").select("id").limit(1); if (error) throw error; }
-      catch (x) { $("#gGo").disabled = false; const m = String((x && (x.message || x.code)) || x); err.textContent = /journal|42P01|relation|schema cache/i.test(m) ? "Connected, but the journal table is missing. Run the setup script in Supabase first." : /api key|jwt|401/i.test(m) ? "That key didn't work. Copy the publishable key again." : "Couldn't reach that database. Check the Project URL."; return; }
-      try { localStorage.setItem("tj.supa", JSON.stringify({ url, key })); } catch (x) {}
-      location.reload();
-    });
-  });
-}
 function authScreen(mode = "in", note = "") {
   S.locked = true; render();
   const up = mode === "up";
-  showGate(`<div class="gwrap"><form class="gcard" id="gAuth"><div class="gword">MYFUNDEDBOOK</div><h2>${up ? "Create your account" : "Sign in"}</h2><div class="sub">${up ? "Your trades save to your own database and sync to every device you sign in on." : "Sign in to open your journal on this device."}</div>
+  showGate(`<div class="gwrap"><form class="gcard" id="gAuth"><div class="gword">MYFUNDEDBOOK</div><h2>${up ? "Create your account" : "Sign in"}</h2><div class="sub">${up ? "Your trades are saved on your own server and are the same on every device you sign in on." : "Sign in to open your journal on this device."}</div>
     ${up ? `<input id="gName" placeholder="Your name" autocomplete="name" aria-label="Your name">` : ""}
     <input id="gEmail" type="email" placeholder="Email" autocomplete="email" aria-label="Email">
     <input type="password" id="gPw" placeholder="${up ? "Password (min 6 characters)" : "Password"}" autocomplete="${up ? "new-password" : "current-password"}" aria-label="Password">
-    <div class="err" id="gErr" role="alert"></div>${note ? `<div class="ok">${esc(note)}</div>` : ""}<button class="btn primary" type="submit" id="gGo">${up ? "Create account" : "Sign in"}</button>
-    ${up ? "" : `<button type="button" class="glink" id="gForgot">Forgot password?</button>`}</form>
+    <div class="err" id="gErr" role="alert"></div>${note ? `<div class="ok">${esc(note)}</div>` : ""}<button class="btn primary" type="submit" id="gGo">${up ? "Create account" : "Sign in"}</button></form>
     <button class="gskip" type="button" id="gSwap">${up ? "Already have an account? Sign in" : "New here? Create an account"}</button></div>`, () => {
     setTimeout(() => $(up ? "#gName" : "#gEmail").focus(), 60);
     const err = $("#gErr"), go = $("#gGo");
     $("#gSwap").addEventListener("click", () => authScreen(up ? "in" : "up"));
-    if (!up) $("#gForgot").addEventListener("click", async () => {
-      const email = $("#gEmail").value.trim(); if (!email) { err.textContent = "Type your email above, then tap Forgot password."; return; }
-      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
-      if (error) err.textContent = authMsg(error); else authScreen("in", `We sent a password reset link to ${email}.`);
-    });
     $("#gAuth").addEventListener("submit", async e => {
       e.preventDefault(); const email = $("#gEmail").value.trim(), password = $("#gPw").value; err.textContent = "";
       if (!email || !password) { err.textContent = "Enter your email and password."; return; }
       go.disabled = true;
       if (up) {
         const name = $("#gName").value.trim(); if (!name) { go.disabled = false; err.textContent = "Enter your name."; return; } if (password.length < 6) { go.disabled = false; err.textContent = "Password needs at least 6 characters."; return; }
-        const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name }, emailRedirectTo: location.origin + location.pathname } });
+        const { data, error } = await sb.auth.signUp({ email, password, options: { data: { name } } });
         if (error) { go.disabled = false; err.textContent = authMsg(error); return; }
         if (data.session) startWeb(data.session.user); else authScreen("in", `Check ${email} and tap the confirm link, then sign in here.`);
       } else {
@@ -2197,18 +2084,6 @@ function authScreen(mode = "in", note = "") {
         if (error) { go.disabled = false; err.textContent = authMsg(error); const f = $("#gAuth"); f.classList.remove("shake"); void f.offsetWidth; f.classList.add("shake"); return; }
         startWeb(data.session.user);
       }
-    });
-  });
-}
-function newPwScreen(user) {
-  showGate(`<div class="gwrap"><form class="gcard" id="gNewPw" autocomplete="off"><div class="gword">MYFUNDEDBOOK</div><h2>Set a new password</h2><div class="sub">For ${esc(user.email || "your account")}.</div>
-    <input type="password" id="gPw" placeholder="New password (min 6 characters)" autocomplete="new-password" aria-label="New password"><input type="password" id="gPw2" placeholder="Confirm password" autocomplete="new-password" aria-label="Confirm password">
-    <div class="err" id="gErr" role="alert"></div><button class="btn primary" type="submit">Save password</button></form></div>`, () => {
-    $("#gNewPw").addEventListener("submit", async e => {
-      e.preventDefault(); const pw = $("#gPw").value, err = $("#gErr");
-      if (pw.length < 6) { err.textContent = "Password needs at least 6 characters."; return; } if (pw !== $("#gPw2").value) { err.textContent = "Passwords don't match."; return; }
-      const { error } = await sb.auth.updateUser({ password: pw }); if (error) { err.textContent = authMsg(error); return; }
-      history.replaceState(null, "", location.pathname); toast("Password saved"); startWeb(user);
     });
   });
 }
@@ -2221,13 +2096,14 @@ async function startWeb(user) {
   welcome(name || (user.email || "").split("@")[0]);
 }
 async function bootWeb() {
-  const cfg = supaCfg(); if (!cfg) return connectScreen();
-  const recovering = /type=recovery/.test(location.hash);
-  try { await loadSupabase(); sb = supabase.createClient(cfg.url, cfg.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }); }
-  catch (e) { showGate(`<div class="gwrap"><div class="gcard"><div class="gword">MYFUNDEDBOOK</div><h2>You're offline</h2><div class="sub">Couldn't reach your database. Check your internet, then try again.</div><button class="btn primary" type="button" onclick="location.reload()">Try again</button></div></div>`); return; }
+  const offline = msg => showGate(`<div class="gwrap"><div class="gcard"><div class="gword">MYFUNDEDBOOK</div><h2>Can't reach your journal</h2><div class="sub">${esc(msg)}</div><button class="btn primary" type="button" onclick="location.reload()">Try again</button></div></div>`);
+  if (!window.supabase) return offline("The app files didn't load completely (shim.js). Reload the page.");
+  sb = window.supabase.createClient();
   sb.auth.onAuthStateChange(ev => { if (ev === "SIGNED_OUT" && sbUser) location.reload(); });
-  const { data } = await sb.auth.getSession(), session = data && data.session;
-  if (session && recovering) newPwScreen(session.user); else if (session) startWeb(session.user); else authScreen();
+  const { data, error } = await sb.auth.getSession();
+  if (error) return offline("The journal server isn't responding. Check your connection and that the backend is running, then try again.");
+  const session = data && data.session;
+  if (session) startWeb(session.user); else authScreen();
 }
 ACT.signOut = async () => { if (!sb) return; if (!confirm("Sign out of your journal on this device?")) return; try { await sb.auth.signOut(); } catch (e) {} location.reload(); };
 ACT.webPw = async () => {

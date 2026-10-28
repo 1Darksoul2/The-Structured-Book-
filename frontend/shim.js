@@ -13,8 +13,8 @@
       if (raw) headers["Content-Type"] = raw.type || "application/octet-stream"; else if (body !== undefined) headers["Content-Type"] = "application/json";
       const r = await fetch(API + url, { method, headers, body: raw || (body === undefined ? undefined : JSON.stringify(body)) });
       const j = await r.json().catch(() => ({}));
-      return r.ok ? { data: j, error: null } : { data: null, error: { message: (j.error && j.error.message) || "Request failed" } };
-    } catch (e) { return { data: null, error: { message: "Failed to fetch" } }; }
+      return r.ok ? { data: j, error: null } : { data: null, error: { message: (j.error && j.error.message) || "Request failed", status: r.status } };
+    } catch (e) { return { data: null, error: { message: "Failed to fetch", status: 0 } }; }
   }
   const listeners = [];
   const session = r => { if (r.error) return r; setTok(r.data.token); return { data: { session: { user: r.data.user }, user: r.data.user }, error: null }; };
@@ -22,10 +22,9 @@
     async signUp({ email, password, options }) { return session(await call("POST", "/api/signup", { email, password, name: options && options.data && options.data.name })); },
     async signInWithPassword({ email, password }) { return session(await call("POST", "/api/login", { email, password })); },
     async signOut() { await call("POST", "/api/logout", {}); setTok(null); listeners.forEach(f => f("SIGNED_OUT")); return { error: null }; },
-    async getSession() { if (!getTok()) return { data: { session: null } }; const r = await call("GET", "/api/me"); const u = r.data && r.data.user; if (!u) setTok(null); return { data: { session: u ? { user: u } : null } }; },
+    async getSession() { if (!getTok()) return { data: { session: null } }; const r = await call("GET", "/api/me"); if (r.error) return { data: { session: null }, error: r.error }; const u = r.data.user; if (!u) setTok(null); return { data: { session: u ? { user: u } : null }, error: null }; },
     onAuthStateChange(fn) { listeners.push(fn); return { data: { subscription: { unsubscribe() {} } } }; },
-    async updateUser({ password }) { const r = await call("POST", "/api/password", { password }); return r.error ? r : { data: {}, error: null }; },
-    async resetPasswordForEmail() { return { error: { message: "Password reset by email isn't available yet." } }; }
+    async updateUser({ password }) { const r = await call("POST", "/api/password", { password }); return r.error ? r : { data: {}, error: null }; }
   };
   function table() {
     let pending = null;
