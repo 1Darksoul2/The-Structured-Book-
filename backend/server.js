@@ -42,6 +42,7 @@ const q = {
   addSession: db.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?,?,?)"),
   session: db.prepare("SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?"),
   delSession: db.prepare("DELETE FROM sessions WHERE token_hash = ?"),
+  delOtherSessions: db.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?"),
   purge: db.prepare("DELETE FROM sessions WHERE expires_at <= ?"),
   rows: db.prepare("SELECT col, id, data FROM journal WHERE user_id = ? ORDER BY col, id LIMIT ? OFFSET ?"),
   upsert: db.prepare("INSERT INTO journal (user_id, col, id, data, updated_at) VALUES (?,?,?,?,?) ON CONFLICT(user_id, col, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"),
@@ -130,6 +131,7 @@ async function api(req, res, url) {
   if (route === "POST /api/password") {
     const pw = String((await readJson(req, 1e4)).password || ""); if (pw.length < 6) return fail(res, 400, "Password needs at least 6 characters.");
     const salt = crypto.randomBytes(16).toString("hex"); q.setPw.run(hashPw(pw, salt), salt, user.id);
+    q.delOtherSessions.run(user.id, sha(bearer(req))); // changing the password signs out every other device
     return send(res, 200, { ok: true });
   }
   if (route === "GET /api/journal") {
